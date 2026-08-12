@@ -1,21 +1,55 @@
 /* ChatGPT Local Project Bridge — content script
  * Injects a floating panel into chatgpt.com that lets you browse local
- * project files (served by the local FastAPI backend) and insert selected
- * file contents into the ChatGPT input box.
+ * project files and insert selected contents into the ChatGPT input box.
+ *
+ * Two data sources:
+ *   MODE_LOCAL  : <input type="file" webkitdirectory> folder picker —
+ *                 click, choose a directory, read files directly in browser.
+ *                 No local server needed.
+ *   MODE_SERVER : legacy FastAPI backend on localhost:8787 (multi-project).
  */
 (function () {
   "use strict";
 
   const API_BASE = "http://127.0.0.1:8787";
-  const STORAGE_KEY = "clb_selected_files";
+  const MODE_LOCAL = "local";
+  const MODE_SERVER = "server";
+  const MAX_KB = 512;
+
+  // Binary extensions (same rules as the server backend)
+  const BINARY_EXTENSIONS = new Set([
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp", ".tiff", ".tif",
+    ".heic", ".heif", ".raw", ".psd", ".ai", ".sketch",
+    ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v", ".mpg",
+    ".mpeg", ".3gp",
+    ".mp3", ".wav", ".flac", ".aac", ".ogg", ".wma", ".m4a", ".opus",
+    ".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz", ".tgz", ".iso", ".dmg",
+    ".exe", ".dll", ".so", ".dylib", ".bin", ".o", ".a", ".lib", ".class",
+    ".jar", ".war", ".pyc", ".pyd", ".wasm",
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".odt",
+    ".ods", ".odp", ".epub", ".mobi",
+    ".db", ".sqlite", ".sqlite3", ".mdb", ".accdb",
+    ".ttf", ".otf", ".woff", ".woff2", ".eot",
+    ".dat", ".pak", ".bundle", ".asset", ".node",
+  ]);
+
+  const SKIP_DIRS = new Set([
+    ".git", ".svn", ".hg", "node_modules", "__pycache__", ".venv", "venv",
+    "env", ".idea", ".vscode", ".next", ".nuxt", ".cache",
+    ".pytest_cache", ".mypy_cache", ".ruff_cache", "dist", "build", "target",
+    "out", ".gradle", ".mvn", ".terraform", "vendor",
+  ]);
 
   // ---- state ----
+  let mode = MODE_LOCAL;              // default to the serverless picker
   let projects = [];
   let currentProject = -1;
   let treeCache = null;
   let selectedFiles = new Set();
+  let localFileMap = new Map();       // relPath -> File (local mode)
   let panelEl = null;
   let toggleBtn = null;
+  let folderInput = null;
 
   // ---- entry ----
   init();
@@ -46,19 +80,23 @@
     root.innerHTML = `
       <button id="clb-toggle" title="ChatGPT Local Bridge">{"</button>
       <div id="clb-panel">
+        <div class="clb-local-row">
+          <button class="clb-btn clb-big" id="clb-pick-folder">📂 选择工作目录</button>
+          <span class="clb-local-info" id="clb-local-info">无需本地服务器</span>
+        </div>
         <div class="clb-header">
-          <select id="clb-project-select"><option value="-1">选择项目…</option></select>
+          <select id="clb-project-select" title="需要启动 start.ps1 的服务器模式"><option value="-1">[服务器模式] 选择项目…</option></select>
           <button class="clb-btn" id="clb-refresh" title="刷新文件树">↻</button>
         </div>
         <div class="clb-actions">
           <button class="clb-btn primary" id="clb-insert">插入选中文件</button>
-          <button class="clb-btn" id="clb-insert-all-text">插入全部文本文件</button>
-          <button class="clb-btn" id="clb-copy-bundle">复制为 Markdown</button>
+          <button class="clb-btn" id="clb-insert-all-text">插入全部文本</button>
+          <button class="clb-btn" id="clb-copy-bundle">复制 Markdown</button>
           <span style="flex:1"></span>
           <button class="clb-btn" id="clb-uncheck-all">全不选</button>
         </div>
         <div id="clb-tree">
-          <div style="padding:12px;color:#888">请先选择项目并刷新</div>
+          <div style="padding:12px;color:#888">👆 点「选择工作目录」挑一个文件夹</div>
         </div>
         <div class="clb-status" id="clb-status">就绪</div>
       </div>
@@ -70,20 +108,26 @@
 
     toggleBtn.addEventListener("click", () => {
       panelEl.classList.toggle("open");
-      if (panelEl.classList.contains("open") && projects.length === 0) {
-        loadProjects();
-      }
     });
+
+    // Folder picker button
+    root.querySelector("#clb-pick-folder").addEventListener("click", pickLocalDirectory);
 
     root.querySelector("#clb-project-select").addEventListener("change", (e) => {
       currentProject = parseInt(e.target.value, 10);
+      if (currentProject < 0) {
+        mode = MODE_LOCAL;
+        return;
+      }
+      mode = MODE_SERVER;
       treeCache = null;
       selectedFiles.clear();
-      if (currentProject >= 0) loadTree();
+      localFileMap.clear();
+      loadTree();
     });
 
     root.querySelector("#clb-refresh").addEventListener("click", () => {
-      if (currentProject >= 0) loadTree();
+      if (mode === MODE_SERVER && currentProject >= 0) loadTree();
     });
 
     root.querySelector("#clb-insert").addEventListener("click", () => {
@@ -122,7 +166,98 @@
   }
 
   // ------------------------------------------------------------------
-  // API
+  // LOCAL MODE: folder picker (no server)
+  // ------------------------------------------------------------------
+  function pickLocalDirectory() {
+    if (!folderInput) {
+      folderInput = document.createElement("input");
+      folderInput.type = "file";
+      folderInput.webkitdirectory = true;
+      folderInput.style.display = "none";
+      folderInput.addEventListener("change", onFolderPicked);
+      document.body.appendChild(folderInput);
+    }
+    folderInput.value = "";
+    folderInput.click();
+  }
+
+  async function onFolderPicked(e) {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+
+    mode = MODE_LOCAL;
+    currentProject = -1;
+    const sel = document.querySelector("#clb-project-select");
+    sel.value = "-1";
+
+    setStatus('<span class="clb-spinner"></span>整理文件树…');
+    // Yield to let the status render
+    await new Promise((r) => setTimeout(r, 30));
+
+    // Build relPath map: webkitRelativePath like "myProject/src/main.py"
+    localFileMap.clear();
+    for (const f of files) {
+      const rel = f.webkitRelativePath || f.name;
+      // Strip first path segment (the picked folder name itself)
+      const parts = rel.split("/");
+      const relPath = parts.slice(1).join("/") || parts[0];
+      // Skip unwanted dirs
+      if (parts.some((p) => SKIP_DIRS.has(p))) continue;
+      localFileMap.set(relPath, f);
+    }
+
+    treeCache = buildLocalTree([...localFileMap.keys()]);
+    selectedFiles.clear();
+    collectDefaultChecked(treeCache);
+    renderTree();
+
+    const dirName = (files[0].webkitRelativePath || "").split("/")[0] || "已选择目录";
+    document.querySelector("#clb-local-info").textContent = `📁 ${dirName}（${files.length} 个文件）`;
+    setStatus(`已选择目录，默认勾选 ${selectedFiles.size} 个文本文件`);
+  }
+
+  function buildLocalTree(paths) {
+    const root = { name: "local", path: "", type: "dir", children: [] };
+    const byPath = new Map([["", root]]);
+
+    for (const rel of paths.sort()) {
+      const parts = rel.split("/");
+      let current = root;
+      let acc = "";
+      for (let i = 0; i < parts.length; i++) {
+        acc = acc ? `${acc}/${parts[i]}` : parts[i];
+        let node = byPath.get(acc);
+        if (!node) {
+          const isFile = i === parts.length - 1;
+          if (isFile) {
+            const f = localFileMap.get(acc);
+            const ext = parts[i].includes(".") ? "." + parts[i].split(".").pop().toLowerCase() : "";
+            const sizeKb = f ? Math.max(0.1, f.size / 1024) : 0.1;
+            const isBinary = BINARY_EXTENSIONS.has(ext);
+            const tooBig = sizeKb > MAX_KB;
+            node = {
+              name: parts[i],
+              path: acc,
+              type: "file",
+              ext,
+              size_kb: Math.round(sizeKb * 10) / 10,
+              is_text: !isBinary,       // text files can be manually picked even if big
+              checked: !isBinary && !tooBig, // default-check only small text files
+            };
+          } else {
+            node = { name: parts[i], path: acc, type: "dir", children: [] };
+          }
+          byPath.set(acc, node);
+          current.children.push(node);
+        }
+        current = node;
+      }
+    }
+    return root;
+  }
+
+  // ------------------------------------------------------------------
+  // SERVER MODE API
   // ------------------------------------------------------------------
   async function api(path, options = {}) {
     const url = `${API_BASE}${path}`;
@@ -143,7 +278,7 @@
       const data = await api("/api/projects");
       projects = data.projects || [];
       const sel = document.querySelector("#clb-project-select");
-      sel.innerHTML = '<option value="-1">选择项目…</option>';
+      sel.innerHTML = '<option value="-1">[服务器模式] 选择项目…</option>';
       projects.forEach((p, i) => {
         const opt = document.createElement("option");
         opt.value = i;
@@ -151,7 +286,7 @@
         if (!p.exists) opt.disabled = true;
         sel.appendChild(opt);
       });
-      setStatus(`共 ${projects.length} 个项目`);
+      setStatus(`服务器模式：${projects.length} 个项目`);
     } catch (e) {
       setStatus(`连接失败: ${e.message}。请确认本地服务器已启动 (端口 8787)。`, true);
     }
@@ -162,7 +297,6 @@
       setStatus('<span class="clb-spinner"></span>加载文件树…');
       const data = await api(`/api/tree?project_index=${currentProject}`);
       treeCache = data.tree;
-      // Pre-select all text files by default (the backend already marked them checked)
       selectedFiles.clear();
       collectDefaultChecked(treeCache);
       renderTree();
@@ -201,7 +335,6 @@
       container.innerHTML = '<div style="padding:12px;color:#888">未加载</div>';
       return;
     }
-    // Root children
     if (treeCache.children) {
       treeCache.children.forEach((child) => container.appendChild(renderNode(child, 0)));
     }
@@ -232,7 +365,6 @@
         const open = childrenWrap.classList.toggle("open");
         chev.textContent = open ? "▼" : "▶";
       });
-      // Click on folder name also toggles
       item.querySelector(".clb-name").addEventListener("click", () => {
         const open = childrenWrap.classList.toggle("open");
         chev.textContent = open ? "▼" : "▶";
@@ -271,23 +403,54 @@
   }
 
   // ------------------------------------------------------------------
-  // Insert / copy bundle
+  // Bundle generation (local read or server api)
   // ------------------------------------------------------------------
+  async function getBundleText(files) {
+    if (mode === MODE_LOCAL) {
+      // Read files via FileReader in browser — no server
+      const parts = ["# Project Files Bundle\n", `Files: ${files.length}\n\n---\n`];
+      const chunks = [];
+      const CHUNK = 8;
+      for (let i = 0; i < files.length; i += CHUNK) {
+        const batch = files.slice(i, i + CHUNK);
+        const results = await Promise.all(batch.map(readLocalFile));
+        results.forEach(({ path, content, error }) => {
+          chunks.push(`\n## \`${path}\`\n`);
+          const lang = path.includes(".") ? path.split(".").pop() : "text";
+          chunks.push(error ? `\n[Error: ${error}]\n` : `\`\`\`${lang}\n${content}\n\`\`\`\n`);
+        });
+      }
+      return parts.join("") + chunks.join("");
+    }
+    // Server mode
+    const data = await api("/api/bundle", {
+      method: "POST",
+      body: JSON.stringify({ project_index: currentProject, files }),
+    });
+    return data.bundle;
+  }
+
+  function readLocalFile(rel) {
+    return new Promise((resolve) => {
+      const f = localFileMap.get(rel);
+      if (!f) return resolve({ path: rel, error: "file not found" });
+      const reader = new FileReader();
+      reader.onload = () => resolve({ path: rel, content: String(reader.result) });
+      reader.onerror = () => resolve({ path: rel, error: "read failed" });
+      reader.readAsText(f, "utf-8");
+    });
+  }
+
   async function insertBundle(files) {
     try {
       setStatus('<span class="clb-spinner"></span>读取文件内容…');
-      const data = await api("/api/bundle", {
-        method: "POST",
-        body: JSON.stringify({ project_index: currentProject, files }),
-      });
-      const text = data.bundle;
-      setStatus(`已生成 ${data.count} 个文件的合并文本，正在插入…`);
+      const text = await getBundleText(files);
+      setStatus(`已生成 ${files.length} 个文件的合并文本，正在插入…`);
 
       const ok = await insertIntoChatInput(text);
       if (ok) {
-        setStatus(`✅ 已插入 ${data.count} 个文件 (${text.length} 字符)`);
+        setStatus(`✅ 已插入 ${files.length} 个文件 (${text.length} 字符)`);
       } else {
-        // Fallback: copy to clipboard
         await navigator.clipboard.writeText(text);
         setStatus(`⚠️ 无法自动插入，已复制到剪贴板 (${text.length} 字符)`);
       }
@@ -299,12 +462,9 @@
   async function copyBundle(files) {
     try {
       setStatus('<span class="clb-spinner"></span>读取文件内容…');
-      const data = await api("/api/bundle", {
-        method: "POST",
-        body: JSON.stringify({ project_index: currentProject, files }),
-      });
-      await navigator.clipboard.writeText(data.bundle);
-      setStatus(`✅ 已复制 ${data.count} 个文件 (${data.bundle.length} 字符) 到剪贴板`);
+      const text = await getBundleText(files);
+      await navigator.clipboard.writeText(text);
+      setStatus(`✅ 已复制 ${files.length} 个文件 (${text.length} 字符) 到剪贴板`);
     } catch (e) {
       setStatus(`复制失败: ${e.message}`, true);
     }
@@ -312,30 +472,23 @@
 
   /**
    * Try to insert text into ChatGPT's input box.
-   * ChatGPT uses a ProseMirror contenteditable. We try multiple strategies.
    */
   async function insertIntoChatInput(text) {
-    // Strategy 1: ProseMirror contenteditable div (current ChatGPT UI)
     const editors = document.querySelectorAll('div[contenteditable="true"]');
     for (const ed of editors) {
       const closest = ed.closest("form");
-      // Prefer an editor inside a form (the composer)
       if (closest || ed.getAttribute("id") === "prompt-textarea") {
         if (tryInsertProseMirror(ed, text)) return true;
       }
     }
-    // Fallback: any contenteditable
     for (const ed of document.querySelectorAll('div[contenteditable="true"]')) {
       if (tryInsertProseMirror(ed, text)) return true;
     }
-    // Strategy 2: textarea (legacy UI)
     const ta = document.querySelector('textarea[data-id="root"]') || document.querySelector("textarea#prompt-textarea");
     if (ta) {
       ta.focus();
-      // Use execCommand for textarea
       const ok = document.execCommand("insertText", false, text);
       if (ok) return true;
-      // Direct value set
       ta.value = text;
       ta.dispatchEvent(new Event("input", { bubbles: true }));
       return true;
@@ -345,15 +498,12 @@
 
   function tryInsertProseMirror(el, text) {
     el.focus();
-    // Try execCommand first — works in many contenteditable setups
     const ok = document.execCommand("insertText", false, text);
     if (ok && el.textContent.length > 0) return true;
-    // Fallback: direct DOM manipulation (ProseMirror)
     try {
-      // Insert as a single <p> with line breaks preserved
       const lines = text.split("\n");
       const frag = document.createDocumentFragment();
-      lines.forEach((line, i) => {
+      lines.forEach((line) => {
         const p = document.createElement("p");
         p.textContent = line;
         frag.appendChild(p);
