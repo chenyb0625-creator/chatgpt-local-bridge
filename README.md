@@ -2,6 +2,8 @@
 
 让网页版 ChatGPT 能浏览并插入你本地项目文件的小工具，免再手动一个个上传。
 
+> 🗂 想让 ChatGPT 秒懂这个工具？看 [`PROJECT_STRUCTURE.md`](PROJECT_STRUCTURE.md) 或 [`PROJECT_STRUCTURE.png`](PROJECT_STRUCTURE.png)（可视化版，可直接拖进 ChatGPT）。
+
 ## 两种使用模式
 
 ### 模式 A：直接选目录（推荐，无需服务器）
