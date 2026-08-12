@@ -1,0 +1,26 @@
+{
+  "projects": [
+    {
+      "name": "人工智能全整理复习",
+      "path": "C:/Users/ASUS/Desktop/人工智能全整理复习"
+    },
+    {
+      "name": "BIGAI-cognition",
+      "path": "C:/Users/ASUS/Desktop/BIGAI-cognition"
+    },
+    {
+      "name": "荷塘雨课堂刷课助手",
+      "path": "C:/Users/ASUS/Documents/Thunder_Course_Clawl"
+    },
+    {
+      "name": "nail-salon-mini-program",
+      "path": "C:/Users/ASUS/Desktop/nail-salon-mini-program"
+    },
+    {
+      "name": "smart_warehouse",
+      "path": "C:/Users/ASUS/Documents/GitHub/smart_warehouse"
+    }
+  ],
+  "port": 8787,
+  "max_file_size_kb": 512
+}
