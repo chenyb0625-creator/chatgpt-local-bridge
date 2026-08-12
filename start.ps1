@@ -1,4 +1,4 @@
-# ChatGPT Local Bridge - 一键启动脚本 (PowerShell)
+﻿# ChatGPT Local Bridge - 一键启动脚本 (PowerShell)
 $ErrorActionPreference = "Stop"
 
 $ServerDir = Join-Path $PSScriptRoot "server"
