@@ -1,6 +1,8 @@
-/* ChatGPT Local Project Bridge — content script
- * Injects a floating panel into chatgpt.com that lets you browse local
- * project files and insert selected contents into the ChatGPT input box.
+/* AI Local Project Bridge — content script
+ * Injects a floating panel into chatgpt.com / chat.deepseek.com that lets
+ * you browse local project files and insert selected contents into the AI
+ * input box, ALWAYS preceded by the project structure tree so the AI can
+ * see how files are organized.
  *
  * Two data sources:
  *   MODE_LOCAL  : <input type="file" webkitdirectory> folder picker —
@@ -89,8 +91,9 @@
           <button class="clb-btn" id="clb-refresh" title="刷新文件树">↻</button>
         </div>
         <div class="clb-actions">
-          <button class="clb-btn primary" id="clb-insert">插入选中文件</button>
-          <button class="clb-btn" id="clb-insert-all-text">插入全部文本</button>
+          <button class="clb-btn primary" id="clb-insert" title="插入时会自动在开头附带项目结构树">插入选中文件</button>
+          <button class="clb-btn" id="clb-insert-structure" title="只插入目录树，让 AI 看懂项目结构">插入项目结构</button>
+          <button class="clb-btn" id="clb-insert-all-text" title="插入时会自动在开头附带项目结构树">插入全部文本</button>
           <button class="clb-btn" id="clb-copy-bundle">复制 Markdown</button>
           <span style="flex:1"></span>
           <button class="clb-btn" id="clb-uncheck-all">全不选</button>
@@ -147,6 +150,14 @@
         return;
       }
       insertBundle(allText);
+    });
+
+    root.querySelector("#clb-insert-structure").addEventListener("click", () => {
+      if (!treeCache) {
+        setStatus("请先选择工作目录", true);
+        return;
+      }
+      insertStructureOnly();
     });
 
     root.querySelector("#clb-copy-bundle").addEventListener("click", () => {
@@ -405,10 +416,55 @@
   // ------------------------------------------------------------------
   // Bundle generation (local read or server api)
   // ------------------------------------------------------------------
+  /**
+   * Build an ASCII directory tree from treeCache so the AI can see the
+   * project layout. Returns a string like:
+   *   my-project/
+   *   ├── src/
+   *   │   ├── main.py
+   *   │   └── utils.py
+   *   └── README.md
+   */
+  function buildStructureTree() {
+    if (!treeCache) return "";
+    const lines = [];
+    const rootName = treeCache.name || "project";
+    lines.push(`${rootName}/`);
+
+    const walk = (node, prefix, isLast) => {
+      // Drop empty dirs so the tree stays compact
+      const children = (node.children || []).filter((c) => !(c.type === "dir" && c.children.length === 0));
+      const mark = isLast ? "└── " : "├── ";
+      const suffix = node.type === "dir" ? "/" : "";
+      lines.push(`${prefix}${mark}${node.name}${suffix}`);
+      children.forEach((c, i) => {
+        walk(c, prefix + (isLast ? "    " : "│   "), i === children.length - 1);
+      });
+    };
+
+    const rootChildren = (treeCache.children || []).filter((c) => !(c.type === "dir" && c.children.length === 0));
+    rootChildren.forEach((c, i) => {
+      walk(c, "", i === rootChildren.length - 1);
+    });
+    return lines.join("\n");
+  }
+
+  function structurePrompt() {
+    const tree = buildStructureTree();
+    if (!tree) return "";
+    return [
+      "# 项目结构",
+      "```",
+      tree,
+      "```",
+      "",
+    ].join("\n");
+  }
+
   async function getBundleText(files) {
     if (mode === MODE_LOCAL) {
       // Read files via FileReader in browser — no server
-      const parts = ["# Project Files Bundle\n", `Files: ${files.length}\n\n---\n`];
+      const parts = [structurePrompt(), "# Project Files Bundle\n", `Files: ${files.length}\n\n---\n`];
       const chunks = [];
       const CHUNK = 8;
       for (let i = 0; i < files.length; i += CHUNK) {
@@ -427,7 +483,26 @@
       method: "POST",
       body: JSON.stringify({ project_index: currentProject, files }),
     });
-    return data.bundle;
+    // Prepend the structure tree to the server bundle too
+    const tree = structurePrompt();
+    return tree ? tree + data.bundle : data.bundle;
+  }
+
+  /** Insert only the directory tree, so the AI can see how files are organized. */
+  async function insertStructureOnly() {
+    const text = structurePrompt();
+    if (!text) {
+      setStatus("没有可用的项目结构", true);
+      return;
+    }
+    setStatus("正在插入项目结构…");
+    const ok = await insertIntoChatInput(text);
+    if (ok) {
+      setStatus(`✅ 已插入项目结构 (${text.length} 字符)`);
+    } else {
+      await navigator.clipboard.writeText(text);
+      setStatus("⚠️ 无法自动插入，已复制到剪贴板");
+    }
   }
 
   function readLocalFile(rel) {
@@ -471,9 +546,21 @@
   }
 
   /**
-   * Try to insert text into ChatGPT's input box.
+   * Try to insert text into ChatGPT / DeepSeek input box.
+   * - ChatGPT: ProseMirror contenteditable
+   * - DeepSeek: <textarea id="chat-input">
    */
   async function insertIntoChatInput(text) {
+    // DeepSeek: textarea #chat-input
+    const ds = document.querySelector('textarea#chat-input');
+    if (ds) {
+      ds.focus();
+      const ok = document.execCommand("insertText", false, text);
+      if (ok && ds.value.length > 0) return true;
+      ds.value = text;
+      ds.dispatchEvent(new Event("input", { bubbles: true }));
+      return true;
+    }
     const editors = document.querySelectorAll('div[contenteditable="true"]');
     for (const ed of editors) {
       const closest = ed.closest("form");

@@ -1,8 +1,9 @@
-# ChatGPT Local Bridge
+# ChatGPT / DeepSeek Local Project Bridge
 
-让网页版 ChatGPT 能浏览并插入你本地项目文件的小工具，免再手动一个个上传。
+让网页版 ChatGPT / DeepSeek 能浏览并插入你本地项目文件的小工具，免再手动一个个上传。
 
-> 🗂 想让 ChatGPT 秒懂这个工具？看 [`PROJECT_STRUCTURE.md`](PROJECT_STRUCTURE.md) 或 [`PROJECT_STRUCTURE.png`](PROJECT_STRUCTURE.png)（可视化版，可直接拖进 ChatGPT）。
+> 🗂 **关键特性**：每次插入文件时，会自动在开头附带一份**项目结构树**，让 AI 一眼看懂目录层级关系，再结合代码上下文理解你的项目。
+> 想看这个工具自身的结构？看 [`PROJECT_STRUCTURE.md`](PROJECT_STRUCTURE.md) 或 [`PROJECT_STRUCTURE.png`](PROJECT_STRUCTURE.png)（可视化版，可直接拖进 ChatGPT）。
 
 ## 两种使用模式
 
@@ -23,11 +24,13 @@
 ## 模式 A：直接选目录（最快上手）
 
 1. 安装扩展（见下文「安装扩展」）
-2. 打开 `https://chatgpt.com`
+2. 打开 `https://chatgpt.com` 或 `https://chat.deepseek.com`
 3. 点右下角蓝色 `{"` 按钮展开面板
 4. 点「📂 选择工作目录」→ 选你的项目文件夹
 5. 文件树自动加载，**默认勾选所有文本文件**（二进制/超大文件自动排除）
-6. 点「插入选中文件」→ 内容带路径标注自动进输入框；也可「复制 Markdown」手动粘贴
+6. 点「插入选中文件」→ 内容开头会自动带上**项目结构树**（如 `my-project/ ├── src/ │ ├── main.py ...`），再拼上每个文件的代码，自动进输入框
+7. 只想让 AI 先看结构？点「插入项目结构」单独插入目录树
+8. 也可「复制 Markdown」手动粘贴
 
 > 小提示：目录选择后浏览器会提示「此网站想查看文件夹」，选"查看"即可。这是 Chrome 的安全机制，文件只在你本机浏览器里读取，不会被上传到任何地方。
 
